@@ -4,7 +4,26 @@ use crate::lib::{get_port, S5Addr, S5Request};
 use log::*;
 use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
+
+async fn copy(from: &mut OwnedReadHalf, to: &mut OwnedWriteHalf) {
+    let mut buf = [0u8; 1024];
+    loop {
+        let len = from.read(&mut buf).await;
+        if let Err(e) = len {
+            error!("Failed to Read: {}", e);
+            break;
+        } else if let Ok(0) = len {
+            break;
+        } else if let Ok(len) = len {
+            if let Err(e) = to.write_all(&buf[..len]).await {
+                error!("Failed to Write: {}", e);
+                break;
+            }
+        }
+    }
+}
 
 #[tokio::main]
 async fn main() {
@@ -21,54 +40,21 @@ async fn main() {
         let req = handle_connection(&mut socket).await.unwrap();
         let real_socket = handle_traffic(&mut socket, req).await.unwrap();
 
-        let mut bl = [0u8; 1024];
-        let mut br = [0u8; 1024];
-
         let (mut rs, mut ws) = socket.into_split();
         let (mut rr, mut wr) = real_socket.into_split();
 
         tokio::spawn(async move {
-            loop {
-                match rs.read(&mut bl).await {
-                    Err(e) => {
-                        error!("Failed to Read from Real Server: {}", e);
-                        break;
-                    }
-                    Ok(0) => {
-                        break;
-                    }
-                    _ => {}
-                }
-
-                if let Err(e) = wr.write_all(&bl).await {
-                    error!("Failed to Write to Client: {}", e);
-                    break;
-                }
-            }
+            copy(&mut rs, &mut wr).await;
         });
 
-        loop {
-            match rr.read(&mut br).await {
-                Err(e) => {
-                    error!("Failed to Read from Client: {}", e);
-                    break;
-                }
-                Ok(0) => {
-                    break;
-                }
-                _ => {}
-            }
-
-            if let Err(e) = ws.write_all(&br).await {
-                error!("Failed to Write to Real Server: {}", e);
-                break;
-            }
-        }
+        tokio::spawn(async move {
+            copy(&mut rr, &mut ws).await;
+        });
     }
 }
 
 async fn handle_handeshake(socket: &mut TcpStream) {
-    let mut buf: [u8; 32] = [0; 32];
+    let mut buf = [0u8; 32];
     read(socket, &mut buf).await;
 
     if buf[0] != 0x05 {
@@ -79,7 +65,7 @@ async fn handle_handeshake(socket: &mut TcpStream) {
 }
 
 async fn handle_connection(socket: &mut TcpStream) -> Option<S5Request> {
-    let mut buf: [u8; 32] = [0; 32];
+    let mut buf = [0u8; 32];
     read(socket, &mut buf).await;
 
     let atyp = buf[3];
@@ -106,7 +92,6 @@ async fn handle_connection(socket: &mut TcpStream) -> Option<S5Request> {
         None => None,
         Some((dst_addr, dst_port)) => {
             let req = S5Request::new(buf[0], buf[1], buf[3], dst_addr, dst_port);
-            // println!("Client tries to access: {}", dest);
 
             if req.cmd != 0x01 {
                 warn!("Unsupported CMD: {:?}", req.cmd);
