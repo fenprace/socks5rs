@@ -1,7 +1,3 @@
-pub fn get_port(buf: &[u8], start: usize) -> u16 {
-    (buf[start] as u16) << 8 | (buf[start + 1] as u16)
-}
-
 pub enum S5Addr {
     IPv4(u8, u8, u8, u8),
     Domain(String),
